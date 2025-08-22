@@ -1,0 +1,146 @@
+package tools
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"strings"
+	"bytes"
+
+	"github.com/pos-api/mcp-server/config"
+	"github.com/pos-api/mcp-server/models"
+	"github.com/mark3labs/mcp-go/mcp"
+)
+
+func PaymentsaddHandler(cfg *config.APIConfig) func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		args, ok := request.Params.Arguments.(map[string]any)
+		if !ok {
+			return mcp.NewToolResultError("Invalid arguments object"), nil
+		}
+		queryParams := make([]string, 0)
+		if val, ok := args["raw"]; ok {
+			queryParams = append(queryParams, fmt.Sprintf("raw=%v", val))
+		}
+		queryString := ""
+		if len(queryParams) > 0 {
+			queryString = "?" + strings.Join(queryParams, "&")
+		}
+		// Create properly typed request body using the generated schema
+		var requestBody models.PosPayment
+		
+		// Optimized: Single marshal/unmarshal with JSON tags handling field mapping
+		if argsJSON, err := json.Marshal(args); err == nil {
+			if err := json.Unmarshal(argsJSON, &requestBody); err != nil {
+				return mcp.NewToolResultError(fmt.Sprintf("Failed to convert arguments to request type: %v", err)), nil
+			}
+		} else {
+			return mcp.NewToolResultError(fmt.Sprintf("Failed to marshal arguments: %v", err)), nil
+		}
+		
+		bodyBytes, err := json.Marshal(requestBody)
+		if err != nil {
+			return mcp.NewToolResultErrorFromErr("Failed to encode request body", err), nil
+		}
+		url := fmt.Sprintf("%s/pos/payments%s", cfg.BaseURL, queryString)
+		req, err := http.NewRequest("POST", url, bytes.NewBuffer(bodyBytes))
+		req.Header.Set("Content-Type", "application/json")
+		if err != nil {
+			return mcp.NewToolResultErrorFromErr("Failed to create request", err), nil
+		}
+		// Set authentication based on auth type
+		// Fallback to single auth parameter
+		if cfg.APIKey != "" {
+			req.Header.Set("Authorization", cfg.APIKey)
+		}
+		req.Header.Set("Accept", "application/json")
+		if val, ok := args["x-apideck-consumer-id"]; ok {
+			req.Header.Set("x-apideck-consumer-id", fmt.Sprintf("%v", val))
+		}
+		if val, ok := args["x-apideck-app-id"]; ok {
+			req.Header.Set("x-apideck-app-id", fmt.Sprintf("%v", val))
+		}
+		if val, ok := args["x-apideck-service-id"]; ok {
+			req.Header.Set("x-apideck-service-id", fmt.Sprintf("%v", val))
+		}
+
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			return mcp.NewToolResultErrorFromErr("Request failed", err), nil
+		}
+		defer resp.Body.Close()
+
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return mcp.NewToolResultErrorFromErr("Failed to read response body", err), nil
+		}
+
+		if resp.StatusCode >= 400 {
+			return mcp.NewToolResultError(fmt.Sprintf("API error: %s", body)), nil
+		}
+		// Use properly typed response
+		var result models.CreatePosPaymentResponse
+		if err := json.Unmarshal(body, &result); err != nil {
+			// Fallback to raw text if unmarshaling fails
+			return mcp.NewToolResultText(string(body)), nil
+		}
+
+		prettyJSON, err := json.MarshalIndent(result, "", "  ")
+		if err != nil {
+			return mcp.NewToolResultErrorFromErr("Failed to format JSON", err), nil
+		}
+
+		return mcp.NewToolResultText(string(prettyJSON)), nil
+	}
+}
+
+func CreatePaymentsaddTool(cfg *config.APIConfig) models.Tool {
+	tool := mcp.NewTool("post_pos_payments",
+		mcp.WithDescription("Create Payment"),
+		mcp.WithBoolean("raw", mcp.Description("Include raw response. Mostly used for debugging purposes")),
+		mcp.WithString("x-apideck-consumer-id", mcp.Required(), mcp.Description("ID of the consumer which you want to get or push data from")),
+		mcp.WithString("x-apideck-app-id", mcp.Required(), mcp.Description("The ID of your Unify application")),
+		mcp.WithString("x-apideck-service-id", mcp.Description("Provide the service id you want to call (e.g., pipedrive). Only needed when a consumer has activated multiple integrations for a Unified API.")),
+		mcp.WithString("refunded", mcp.Description("Input parameter: The initial amount of money approved for this payment.")),
+		mcp.WithObject("cash", mcp.Description("Input parameter: Cash details for this payment")),
+		mcp.WithObject("bank_account", mcp.Description("Input parameter: Card details for this payment. This field is currently not available. Reach out to our team for more info.")),
+		mcp.WithString("total", mcp.Description("")),
+		mcp.WithString("employee_id", mcp.Description("")),
+		mcp.WithArray("service_charges", mcp.Description("Input parameter: Optional service charges or gratuity tip applied to the order.")),
+		mcp.WithString("change_back_cash_amount", mcp.Description("")),
+		mcp.WithString("device_id", mcp.Description("")),
+		mcp.WithObject("custom_mappings", mcp.Description("Input parameter: When custom mappings are configured on the resource, the result is included here.")),
+		mcp.WithString("idempotency_key", mcp.Description("Input parameter: A value you specify that uniquely identifies this request among requests you have sent.")),
+		mcp.WithString("order_id", mcp.Required(), mcp.Description("")),
+		mcp.WithString("external_payment_id", mcp.Description("")),
+		mcp.WithString("id", mcp.Description("Input parameter: A unique identifier for an object.")),
+		mcp.WithObject("card_details", mcp.Description("")),
+		mcp.WithString("updated_at", mcp.Description("Input parameter: The date and time when the object was last updated.")),
+		mcp.WithString("updated_by", mcp.Description("Input parameter: The user who last updated the object.")),
+		mcp.WithString("tip", mcp.Description("")),
+		mcp.WithString("status", mcp.Description("Input parameter: Status of this payment.")),
+		mcp.WithString("app_fee", mcp.Description("Input parameter: The amount the developer is taking as a fee for facilitating the payment on behalf of the seller.")),
+		mcp.WithString("tender_id", mcp.Required(), mcp.Description("")),
+		mcp.WithObject("external_details", mcp.Description("Input parameter: Details about an external payment.")),
+		mcp.WithString("source", mcp.Description("Input parameter: Source of this payment.")),
+		mcp.WithObject("wallet", mcp.Description("Input parameter: Wallet details for this payment. This field is currently not available. Reach out to our team for more info.")),
+		mcp.WithString("source_id", mcp.Required(), mcp.Description("Input parameter: The ID for the source of funds for this payment. Square-only: This can be a payment token (card nonce) generated by the payment form or a card on file made linked to the customer. if recording a payment that the seller received outside of Square, specify either `CASH` or `EXTERNAL`.")),
+		mcp.WithString("tax", mcp.Description("")),
+		mcp.WithString("currency", mcp.Required(), mcp.Description("Input parameter: Indicates the associated currency for an amount of money. Values correspond to [ISO 4217](https://en.wikipedia.org/wiki/ISO_4217).")),
+		mcp.WithString("created_at", mcp.Description("Input parameter: The date and time when the object was created.")),
+		mcp.WithString("merchant_id", mcp.Description("")),
+		mcp.WithArray("processing_fees", mcp.Description("")),
+		mcp.WithString("approved", mcp.Description("Input parameter: The initial amount of money approved for this payment.")),
+		mcp.WithString("customer_id", mcp.Required(), mcp.Description("")),
+		mcp.WithString("created_by", mcp.Description("Input parameter: The user who created the object.")),
+		mcp.WithString("location_id", mcp.Description("")),
+		mcp.WithString("amount", mcp.Required(), mcp.Description("")),
+	)
+
+	return models.Tool{
+		Definition: tool,
+		Handler:    PaymentsaddHandler(cfg),
+	}
+}
